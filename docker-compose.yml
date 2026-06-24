@@ -1,0 +1,12 @@
+services:
+  scheduler:
+    build: .
+    container_name: scopefi-scheduler
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./scopefi/.env:/app/scopefi/.env:ro
+      - ./logs:/app/logs
+      - ./data/filter:/app/strategy-data-main
+      - ./data/score:/app/scopefi-score

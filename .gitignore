@@ -1,0 +1,9 @@
+.env
+scopefi/.env
+logs/
+data/
+*.csv
+__pycache__/
+*.pyc
+.Python
+*.log
