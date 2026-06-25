@@ -112,6 +112,57 @@ def normalize_wallet(raw: str) -> str:
     return s
 
 
+def _env_int(key: str, *, default: int) -> int:
+    raw = os.environ.get(key)
+    if _env_blank(raw):
+        return default
+    return int(str(raw).strip())
+
+
+@dataclass(frozen=True)
+class ClickHouseSettings:
+    host: str
+    port: int
+    user: str
+    password: str
+    database: str
+
+    @classmethod
+    def from_env(cls) -> ClickHouseSettings:
+        return cls(
+            host=_env_str("CLICKHOUSE_HOST", required=True),
+            port=_env_int("CLICKHOUSE_PORT", default=8123),
+            user=_env_str("CLICKHOUSE_USER", required=True),
+            password=_env_str("CLICKHOUSE_PASSWORD", required=True),
+            database=_env_str("CLICKHOUSE_DATABASE", default="pro"),
+        )
+
+
+def get_clickhouse_client(settings: ClickHouseSettings | None = None):
+    import clickhouse_connect
+
+    s = settings or ClickHouseSettings.from_env()
+    return clickhouse_connect.get_client(
+        host=s.host,
+        port=s.port,
+        username=s.user,
+        password=s.password,
+        database=s.database,
+    )
+
+
+def bind_clickhouse_config(ns: dict[str, Any]) -> ClickHouseSettings:
+    """加载 scopefi/.env 并写入调用模块的 CLICKHOUSE_* 变量。"""
+    load_dotenv()
+    s = ClickHouseSettings.from_env()
+    ns["CLICKHOUSE_HOST"] = s.host
+    ns["CLICKHOUSE_PORT"] = s.port
+    ns["CLICKHOUSE_USER"] = s.user
+    ns["CLICKHOUSE_PASSWORD"] = s.password
+    ns["CLICKHOUSE_DATABASE"] = s.database
+    return s
+
+
 @dataclass(frozen=True)
 class ScopeFiSettings:
     base_url: str
@@ -125,7 +176,7 @@ class ScopeFiSettings:
         return cls(
             base_url=_env_str("SCOPEFI_TRACK_BASE_URL", required=True).rstrip("/"),
             position_path=_env_str(
-                "SCOPEFI_POSITION_PATH", default="/api/internal/user/position"
+                "SCOPEFI_POSITION_PATH", default="/api/track/user/position"
             ),
             timeout_sec=_env_float("SCOPEFI_POSITION_TIMEOUT_SEC", default=15.0),
             api_key=api_key,

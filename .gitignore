@@ -1,6 +1,7 @@
 .env
 scopefi/.env
-logs/
+logs/*
+!logs/.gitkeep
 data/
 *.csv
 __pycache__/

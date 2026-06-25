@@ -8,5 +8,3 @@ services:
     volumes:
       - ./scopefi/.env:/app/scopefi/.env:ro
       - ./logs:/app/logs
-      - ./data/filter:/app/strategy-data-main
-      - ./data/score:/app/scopefi-score

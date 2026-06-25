@@ -20,27 +20,37 @@ import time
 from datetime import date
 from pathlib import Path
 
-import clickhouse_connect
 import pandas as pd
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-SCOPEFI_DIR = SCRIPT_DIR.parent
+
+
+def _scopefi_dir() -> Path:
+    for p in (SCRIPT_DIR.parent, SCRIPT_DIR.parent / "scopefi", SCRIPT_DIR):
+        if (p / "query_wallet_balance.py").is_file():
+            return p
+    return SCRIPT_DIR.parent
+
+
+SCOPEFI_DIR = _scopefi_dir()
 if str(SCOPEFI_DIR) not in sys.path:
     sys.path.insert(0, str(SCOPEFI_DIR))
 
 from query_wallet_balance import (  # noqa: E402
     _chunked,
+    bind_clickhouse_config,
     fetch_balances_map,
+    get_clickhouse_client,
     load_dotenv,
     normalize_wallet,
     ScopeFiSettings,
 )
 
-# ======================== ClickHouse 配置 ========================
-CLICKHOUSE_HOST = "192.168.112.239"
+# ClickHouse 连接见 scopefi/.env（main 中 bind_clickhouse_config 注入 CLICKHOUSE_*）
+CLICKHOUSE_HOST = ""
 CLICKHOUSE_PORT = 8123
-CLICKHOUSE_USER = "writer_pro"
-CLICKHOUSE_PASSWORD = "Y14%s-^X5U=@FkH_Ga"
+CLICKHOUSE_USER = ""
+CLICKHOUSE_PASSWORD = ""
 CLICKHOUSE_DATABASE = "pro"
 
 SOURCE_TABLE = "active_perp_addresses"
@@ -110,13 +120,7 @@ def is_valid_trader_address(addr: object) -> bool:
 
 
 def get_client():
-    return clickhouse_connect.get_client(
-        host=CLICKHOUSE_HOST,
-        port=CLICKHOUSE_PORT,
-        username=CLICKHOUSE_USER,
-        password=CLICKHOUSE_PASSWORD,
-        database=CLICKHOUSE_DATABASE,
-    )
+    return get_clickhouse_client()
 
 
 def fetch_latest_per_user(client) -> pd.DataFrame:
@@ -404,6 +408,7 @@ async def run_pipeline(client) -> int:
 def main() -> int:
     _configure_stdio()
     env_path = load_dotenv()
+    bind_clickhouse_config(globals())
     if env_path:
         print(f"[env] 已加载 {env_path.name}", flush=True)
 

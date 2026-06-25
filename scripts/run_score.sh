@@ -1,4 +1,3 @@
 #!/bin/bash
 set -euo pipefail
-cd /app/scopefi-score
-python ch_score_to_long_short_ratio.py --write
+exec /app/scripts/run_python.sh /app/scopefi-score/ch_score_to_long_short_ratio.py --write

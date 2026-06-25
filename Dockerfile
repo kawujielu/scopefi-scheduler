@@ -1,8 +1,7 @@
-# scopefi-scheduler — 定时跑 active_addresses 过滤 + long_short_ratio 打分
+# scopefi-scheduler — 定时任务：filter(02:00) / score(05:00) / prune(每小时)
 #
 # 构建: docker compose build
 # 运行: docker compose up -d
-
 FROM python:3.11-slim-bookworm
 
 ARG SUPERCRONIC_VERSION=v0.2.33

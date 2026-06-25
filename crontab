@@ -1,3 +1,5 @@
 # 北京时间（容器 TZ=Asia/Shanghai）
 0 2 * * * /app/scripts/run_filter_active.sh >> /proc/1/fd/1 2>&1
 0 5 * * * /app/scripts/run_score.sh >> /proc/1/fd/1 2>&1
+# 每小时整点：剔除零资金地址，INSERT 新快照到 pro.long_short_ratio
+0 * * * * /app/scripts/run_prune_zero_balance.sh >> /proc/1/fd/1 2>&1

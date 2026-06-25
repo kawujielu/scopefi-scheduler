@@ -24,12 +24,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import clickhouse_connect
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 
-# 仅引用 score_fills_by_symbol
 from score_fills_by_symbol import (
     COIN_SKIP_PREFIX,
     MAX_TRADES,
@@ -42,11 +40,11 @@ from score_fills_by_symbol import (
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCOPEFI_DIR = SCRIPT_DIR.parent / "scopefi"
 
-# ======================== ClickHouse ========================
-CLICKHOUSE_HOST = "192.168.112.239"
+# ClickHouse 见 scopefi/.env（main 中 bind_clickhouse_config 注入 CLICKHOUSE_*）
+CLICKHOUSE_HOST = ""
 CLICKHOUSE_PORT = 8123
-CLICKHOUSE_USER = "writer_pro"
-CLICKHOUSE_PASSWORD = "Y14%s-^X5U=@FkH_Ga"
+CLICKHOUSE_USER = ""
+CLICKHOUSE_PASSWORD = ""
 CLICKHOUSE_DATABASE = "pro"
 
 FILLS_TABLE = "user_fill_v2"
@@ -135,13 +133,11 @@ def _configure_stdio() -> None:
 
 
 def get_client():
-    return clickhouse_connect.get_client(
-        host=CLICKHOUSE_HOST,
-        port=CLICKHOUSE_PORT,
-        username=CLICKHOUSE_USER,
-        password=CLICKHOUSE_PASSWORD,
-        database=CLICKHOUSE_DATABASE,
-    )
+    if str(SCOPEFI_DIR) not in sys.path:
+        sys.path.insert(0, str(SCOPEFI_DIR))
+    from query_wallet_balance import get_clickhouse_client  # noqa: E402
+
+    return get_clickhouse_client()
 
 
 def _fmt_preview_cell(v: object, *, max_len: int = 120) -> str:
@@ -1090,6 +1086,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     _configure_stdio()
+    if str(SCOPEFI_DIR) not in sys.path:
+        sys.path.insert(0, str(SCOPEFI_DIR))
+    from query_wallet_balance import bind_clickhouse_config, load_dotenv  # noqa: E402
+
+    env_path = load_dotenv()
+    bind_clickhouse_config(globals())
+    if env_path:
+        print(f"[env] 已加载 {env_path.name}", flush=True)
     args = parse_args()
     try:
         return run(dry_run=not args.write)

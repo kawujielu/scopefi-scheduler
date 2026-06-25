@@ -1,4 +1,3 @@
 #!/bin/bash
 set -euo pipefail
-cd /app/strategy-data-main
-python ch_filter_active_addresses.py
+exec /app/scripts/run_python.sh /app/strategy-data-main/ch_filter_active_addresses.py
