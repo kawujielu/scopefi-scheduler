@@ -4,7 +4,7 @@
 # 运行: docker compose up -d
 FROM python:3.11-slim-bookworm
 
-ARG SUPERCRONIC_VERSION=v0.2.33
+ARG SUPERCRONIC_VERSION=v0.2.43
 ARG TARGETARCH=amd64
 
 RUN apt-get update \
