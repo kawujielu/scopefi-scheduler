@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,60 @@ from score_fills_by_symbol import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-SCOPEFI_DIR = SCRIPT_DIR.parent / "scopefi"
+
+
+def _scopefi_dir() -> Path:
+    for p in (SCRIPT_DIR.parent / "scopefi", SCRIPT_DIR, SCRIPT_DIR.parent):
+        if (p / "query_wallet_balance.py").is_file():
+            return p
+    return SCRIPT_DIR.parent / "scopefi"
+
+
+SCOPEFI_DIR = _scopefi_dir()
+
+
+def _ensure_scopefi_path() -> None:
+    if str(SCOPEFI_DIR) not in sys.path:
+        sys.path.insert(0, str(SCOPEFI_DIR))
+
+
+def _bind_clickhouse_config(globals_ns: dict[str, Any]) -> None:
+    """从 .env 注入 CLICKHOUSE_*；兼容旧版 query_wallet_balance（无 bind_clickhouse_config）。"""
+    _ensure_scopefi_path()
+    from query_wallet_balance import load_dotenv  # noqa: E402
+
+    load_dotenv()
+    try:
+        from query_wallet_balance import bind_clickhouse_config  # noqa: E402
+
+        bind_clickhouse_config(globals_ns)
+        return
+    except ImportError:
+        pass
+    try:
+        from query_wallet_balance import ClickHouseSettings  # noqa: E402
+
+        s = ClickHouseSettings.from_env()
+        globals_ns["CLICKHOUSE_HOST"] = s.host
+        globals_ns["CLICKHOUSE_PORT"] = s.port
+        globals_ns["CLICKHOUSE_USER"] = s.user
+        globals_ns["CLICKHOUSE_PASSWORD"] = s.password
+        globals_ns["CLICKHOUSE_DATABASE"] = s.database
+        return
+    except ImportError:
+        import os
+
+        def _env(key: str, *, default: str = "", required: bool = False) -> str:
+            val = (os.environ.get(key) or default).strip().strip('"').strip("'")
+            if required and not val:
+                raise ValueError(f"环境变量 {key} 未配置（请在 .env 中设置）")
+            return val
+
+        globals_ns["CLICKHOUSE_HOST"] = _env("CLICKHOUSE_HOST", required=True)
+        globals_ns["CLICKHOUSE_PORT"] = int(_env("CLICKHOUSE_PORT", default="8123") or "8123")
+        globals_ns["CLICKHOUSE_USER"] = _env("CLICKHOUSE_USER", required=True)
+        globals_ns["CLICKHOUSE_PASSWORD"] = _env("CLICKHOUSE_PASSWORD", required=True)
+        globals_ns["CLICKHOUSE_DATABASE"] = _env("CLICKHOUSE_DATABASE", default="pro") or "pro"
 
 # ClickHouse 见 scopefi/.env（main 中 bind_clickhouse_config 注入 CLICKHOUSE_*）
 CLICKHOUSE_HOST = ""
@@ -133,8 +187,7 @@ def _configure_stdio() -> None:
 
 
 def get_client():
-    if str(SCOPEFI_DIR) not in sys.path:
-        sys.path.insert(0, str(SCOPEFI_DIR))
+    _ensure_scopefi_path()
     from query_wallet_balance import get_clickhouse_client  # noqa: E402
 
     return get_clickhouse_client()
@@ -155,6 +208,14 @@ def _ch_query_warn(label: str, exc: Exception) -> None:
     print(f"[warn] {label}: {exc}", flush=True)
 
 
+def _ch_query(client, label: str, sql: str, **kwargs):
+    t0 = time.perf_counter()
+    try:
+        return client.query(sql, **kwargs)
+    finally:
+        print(f"[ch] {label}: {time.perf_counter() - t0:.2f}s", flush=True)
+
+
 def _should_inspect_target(explicit: bool | None) -> bool:
     """非 pro 库（如 default 测试库）默认不探查目标表，避免 DESCRIBE 无权限。"""
     if explicit is not None:
@@ -171,7 +232,7 @@ def inspect_target_table(client) -> None:
 
     print(f"\n=== 表结构 {fq} ===", flush=True)
     try:
-        result = client.query(f"DESCRIBE TABLE {tbl}")
+        result = _ch_query(client, f"DESCRIBE {tbl}", f"DESCRIBE TABLE {tbl}")
         cols = result.column_names
         rows = result.result_rows
         if not rows:
@@ -185,7 +246,7 @@ def inspect_target_table(client) -> None:
         _ch_query_warn(f"无法 DESCRIBE {fq}（可能无 SHOW COLUMNS 权限）", e)
 
     try:
-        count_result = client.query(f"SELECT count() FROM {tbl}")
+        count_result = _ch_query(client, f"count {tbl}", f"SELECT count() FROM {tbl}")
         total = int(count_result.result_rows[0][0])
     except Exception as e:
         _ch_query_warn(f"无法统计 {fq} 行数", e)
@@ -205,10 +266,12 @@ def inspect_target_table(client) -> None:
         return
 
     try:
-        latest = client.query(
+        latest = _ch_query(
+            client,
+            f"preview {tbl}",
             f"SELECT * FROM {tbl} "
             f"ORDER BY version DESC, timestamp DESC, coin ASC "
-            f"LIMIT {int(TARGET_PREVIEW_ROWS)}"
+            f"LIMIT {int(TARGET_PREVIEW_ROWS)}",
         )
     except Exception as e:
         _ch_query_warn(f"无法预览 {fq} 数据", e)
@@ -243,7 +306,7 @@ def _table_columns(client) -> frozenset[str]:
         _table_cols_cache = _FILLS_KNOWN_COLUMNS
         return _table_cols_cache
     try:
-        result = client.query(f"DESCRIBE TABLE {FILLS_TABLE}")
+        result = _ch_query(client, f"DESCRIBE {FILLS_TABLE}", f"DESCRIBE TABLE {FILLS_TABLE}")
         cols = frozenset(str(row[0]) for row in result.result_rows)
         if cols:
             _table_cols_cache = cols
@@ -269,16 +332,59 @@ def _sql_ident(name: str) -> str:
     return f"`{name.replace('`', '')}`"
 
 
-def _sql_float_expr(col: str, alias: str) -> str:
-    return f"toFloat64({_sql_ident(col)}) AS {alias}"
+def _sql_float_expr(col: str, alias: str, table: str = "") -> str:
+    col_sql = _sql_ident(col)
+    if table:
+        col_sql = f"{table}.{col_sql}"
+    return f"toFloat64({col_sql}) AS {alias}"
 
 
-def _fills_time_filter_sql() -> str:
+def _fills_time_filter_sql(table_alias: str = "") -> str:
+    time_col = f"{table_alias}.time" if table_alias else "time"
     if LOOKBACK_DAYS > 0:
         return (
-            f"AND fromUnixTimestamp64Milli(time) >= now() - INTERVAL {int(LOOKBACK_DAYS)} DAY"
+            f"AND fromUnixTimestamp64Milli({time_col}) >= "
+            f"now() - INTERVAL {int(LOOKBACK_DAYS)} DAY"
         )
     return ""
+
+
+def _empty_fills_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=["trader", "coin", "dir", "time", "closed_pnl", "start_pos", "sz"]
+    )
+
+
+def _scorable_traders_subquery() -> str:
+    """long|short 成交笔数在 [MIN_TRADES, MAX_TRADES) 内的白名单地址。"""
+    return f"""
+    SELECT lower(toString(f2.trader)) AS trader
+    FROM {FILLS_TABLE} AS f2
+    INNER JOIN {ACTIVE_ADDRESSES_TABLE} AS a
+        ON lower(toString(f2.trader)) = lower(a.trader)
+    WHERE f2.coin = %(coin)s
+      AND lower(toString(f2.trader)) != %(invalid)s
+      AND match(f2.dir, '(?i)long|short')
+      {_fills_time_filter_sql('f2')}
+    GROUP BY trader
+    HAVING count() >= {int(MIN_TRADES)} AND count() < {int(MAX_TRADES)}
+    """
+
+
+def _fills_query_result_to_df(result) -> pd.DataFrame:
+    if not result.result_rows:
+        return _empty_fills_df()
+    df = pd.DataFrame(result.result_rows, columns=result.column_names)
+    df["trader"] = df["trader"].map(_decode_trader)
+    df["closed_pnl"] = pd.to_numeric(df["closed_pnl"], errors="coerce").fillna(0.0)
+    df["time"] = pd.to_numeric(df["time"], errors="coerce")
+    df["start_pos"] = pd.to_numeric(df["start_pos"], errors="coerce").fillna(0.0)
+    df["sz"] = pd.to_numeric(df["sz"], errors="coerce").fillna(0.0)
+    df["coin"] = df["coin"].astype(str)
+    df["dir"] = df["dir"].astype(str)
+    df = df.dropna(subset=["time"])
+    df["date"] = pd.to_datetime(df["time"], unit="ms", utc=True)
+    return df
 
 
 def fetch_distinct_coins(client) -> list[str]:
@@ -293,7 +399,7 @@ def fetch_distinct_coins(client) -> list[str]:
       {_fills_time_filter_sql()}
     ORDER BY coin
     """
-    result = client.query(sql, parameters={"invalid": INVALID_TRADER})
+    result = _ch_query(client, "distinct coins", sql, parameters={"invalid": INVALID_TRADER})
     coins = [str(row[0]) for row in result.result_rows]
     return [c for c in coins if c and not c.startswith(COIN_SKIP_PREFIX)]
 
@@ -312,7 +418,9 @@ def print_address_whitelist_stats(client, coins: list[str]) -> None:
 
     for coin in coins:
         filtered = int(
-            client.query(
+            _ch_query(
+                client,
+                f"whitelist/{coin}/out",
                 f"""
                 SELECT count(DISTINCT lower(toString(trader)))
                 FROM {FILLS_TABLE}
@@ -327,7 +435,9 @@ def print_address_whitelist_stats(client, coins: list[str]) -> None:
             ).result_rows[0][0]
         )
         no_fills = int(
-            client.query(
+            _ch_query(
+                client,
+                f"whitelist/{coin}/idle",
                 f"""
                 SELECT count()
                 FROM {ACTIVE_ADDRESSES_TABLE} AS a
@@ -349,7 +459,9 @@ def print_address_whitelist_stats(client, coins: list[str]) -> None:
         )
 
     filtered_all = int(
-        client.query(
+        _ch_query(
+            client,
+            "whitelist/out_total",
             f"""
             SELECT count(DISTINCT lower(toString(trader)))
             FROM {FILLS_TABLE}
@@ -364,7 +476,9 @@ def print_address_whitelist_stats(client, coins: list[str]) -> None:
         ).result_rows[0][0]
     )
     no_fills_all = int(
-        client.query(
+        _ch_query(
+            client,
+            "whitelist/idle_total",
             f"""
             SELECT count()
             FROM {ACTIVE_ADDRESSES_TABLE} AS a
@@ -387,47 +501,53 @@ def print_address_whitelist_stats(client, coins: list[str]) -> None:
     print(flush=True)
 
 
+def fetch_scorable_trader_count(client, coin: str) -> int:
+    """阶段一：统计 long|short 笔数在 [MIN_TRADES, MAX_TRADES) 的白名单地址数。"""
+    sql = f"SELECT count() FROM ({_scorable_traders_subquery()}) AS scorable"
+    result = _ch_query(
+        client,
+        f"{coin}/scorable_count",
+        sql,
+        parameters={"coin": coin, "invalid": INVALID_TRADER},
+    )
+    return int(result.result_rows[0][0])
+
+
 def fetch_fills_by_coin(client, coin: str) -> pd.DataFrame:
-    """读取某 coin 全部成交（可选 lookback），供打分与持仓方向推断。"""
+    """两阶段读取某 coin 成交：先筛可打分地址，再拉明细（无全局 ORDER BY）。"""
+    scorable_n = fetch_scorable_trader_count(client, coin)
+    print(
+        f"  可打分地址 ({MIN_TRADES}<=N<{MAX_TRADES}): {scorable_n:,}",
+        flush=True,
+    )
+    if scorable_n == 0:
+        return _empty_fills_df()
+
     start_col = _pick_col(client, _START_POS_CANDIDATES, "start_pos")
     pnl_col = _pick_col(client, _CLOSED_PNL_CANDIDATES, "closed_pnl")
     sql = f"""
     SELECT
-        lower(toString(trader)) AS trader,
-        coin,
-        dir,
-        time,
-        {_sql_float_expr(pnl_col, "closed_pnl")},
-        {_sql_float_expr(start_col, "start_pos")},
-        toFloat64(sz) AS sz
-    FROM {FILLS_TABLE}
-    WHERE coin = %(coin)s
-      AND lower(toString(trader)) != %(invalid)s
-      AND lower(toString(trader)) IN (
-          SELECT lower(trader) FROM {ACTIVE_ADDRESSES_TABLE}
-      )
-      {_fills_time_filter_sql()}
-    ORDER BY trader, time
+        lower(toString(f.trader)) AS trader,
+        f.coin,
+        f.dir,
+        f.time,
+        {_sql_float_expr(pnl_col, "closed_pnl", "f")},
+        {_sql_float_expr(start_col, "start_pos", "f")},
+        toFloat64(f.sz) AS sz
+    FROM {FILLS_TABLE} AS f
+    INNER JOIN ({_scorable_traders_subquery()}) AS e
+        ON lower(toString(f.trader)) = e.trader
+    WHERE f.coin = %(coin)s
+      AND lower(toString(f.trader)) != %(invalid)s
+      {_fills_time_filter_sql('f')}
     """
-    result = client.query(
+    result = _ch_query(
+        client,
+        f"{coin}/fills",
         sql,
         parameters={"coin": coin, "invalid": INVALID_TRADER},
     )
-    if not result.result_rows:
-        return pd.DataFrame(
-            columns=["trader", "coin", "dir", "time", "closed_pnl", "start_pos", "sz"]
-        )
-    df = pd.DataFrame(result.result_rows, columns=result.column_names)
-    df["trader"] = df["trader"].map(_decode_trader)
-    df["closed_pnl"] = pd.to_numeric(df["closed_pnl"], errors="coerce").fillna(0.0)
-    df["time"] = pd.to_numeric(df["time"], errors="coerce")
-    df["start_pos"] = pd.to_numeric(df["start_pos"], errors="coerce").fillna(0.0)
-    df["sz"] = pd.to_numeric(df["sz"], errors="coerce").fillna(0.0)
-    df["coin"] = df["coin"].astype(str)
-    df["dir"] = df["dir"].astype(str)
-    df = df.dropna(subset=["time"])
-    df["date"] = pd.to_datetime(df["time"], unit="ms", utc=True)
-    return df
+    return _fills_query_result_to_df(result)
 
 
 def score_coin_verbose(df_coin: pd.DataFrame) -> dict | None:
@@ -499,7 +619,7 @@ def fetch_overall_pnl_by_address(client, _pnl_col: str = "") -> dict[str, float]
     )
     GROUP BY addr
     """
-    result = client.query(sql)
+    result = _ch_query(client, "hyper_portfolio/pnl", sql)
     return {str(row[0]): float(row[1]) for row in result.result_rows}
 
 
@@ -741,8 +861,7 @@ async def attach_balances_for_export(df: pd.DataFrame) -> pd.DataFrame:
         work["balance"] = pd.NA
         return work
 
-    if str(SCOPEFI_DIR) not in sys.path:
-        sys.path.insert(0, str(SCOPEFI_DIR))
+    _ensure_scopefi_path()
     from query_wallet_balance import (  # noqa: E402
         _chunked,
         fetch_balances_map,
@@ -987,7 +1106,11 @@ def run(*, dry_run: bool = True, inspect_target: bool | None = None) -> int:
             suffix = " ..." if len(coins) > 20 else ""
             print(f"  coins: {preview}{suffix}", flush=True)
     active_n = int(
-        client.query(f"SELECT count() FROM {ACTIVE_ADDRESSES_TABLE}").result_rows[0][0]
+        _ch_query(
+            client,
+            f"count {ACTIVE_ADDRESSES_TABLE}",
+            f"SELECT count() FROM {ACTIVE_ADDRESSES_TABLE}",
+        ).result_rows[0][0]
     )
     print(f"地址白名单 {ACTIVE_ADDRESSES_TABLE}: {active_n:,} 个", flush=True)
     do_inspect = _should_inspect_target(inspect_target)
@@ -1086,12 +1209,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     _configure_stdio()
-    if str(SCOPEFI_DIR) not in sys.path:
-        sys.path.insert(0, str(SCOPEFI_DIR))
-    from query_wallet_balance import bind_clickhouse_config, load_dotenv  # noqa: E402
+    _ensure_scopefi_path()
+    from query_wallet_balance import load_dotenv  # noqa: E402
 
     env_path = load_dotenv()
-    bind_clickhouse_config(globals())
+    _bind_clickhouse_config(globals())
     if env_path:
         print(f"[env] 已加载 {env_path.name}", flush=True)
     args = parse_args()
