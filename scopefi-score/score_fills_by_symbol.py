@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import sys
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -206,6 +207,7 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception as exc:
-        print(f"错误: {exc}", file=sys.stderr)
-        raise SystemExit(1) from exc
+    except Exception:
+        print("[error]", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        raise SystemExit(1) from None

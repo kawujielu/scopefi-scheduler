@@ -23,6 +23,7 @@ import asyncio
 import json
 import os
 import sys
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,15 @@ def _configure_stdio() -> None:
             sys.stderr.reconfigure(encoding="utf-8")
         except Exception:
             pass
+
+
+def log_error_exc(prefix: str = "[error]") -> None:
+    print(prefix, file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+
+
+def _http_error(status: int, body: str) -> RuntimeError:
+    return RuntimeError(f"HTTP {status}: {body[:500]}")
 
 
 def _env_blank(raw: str | None) -> bool:
@@ -246,7 +256,7 @@ async def _post_json(
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"HTTP {e.code}: {body[:500]}") from e
+            raise _http_error(e.code, body) from e
 
     try:
         import httpx
@@ -256,14 +266,16 @@ async def _post_json(
     if hasattr(httpx, "AsyncClient"):
         async with httpx.AsyncClient(timeout=timeout_sec) as client:
             r = await client.post(url, json=payload, headers=headers)
-            r.raise_for_status()
+            if r.is_error:
+                raise _http_error(r.status_code, r.text)
             return r.json()
 
     if hasattr(httpx, "Client"):
         def _via_httpx_sync() -> dict[str, Any]:
             with httpx.Client(timeout=timeout_sec) as client:
                 r = client.post(url, json=payload, headers=headers)
-                r.raise_for_status()
+                if r.is_error:
+                    raise _http_error(r.status_code, r.text)
                 return r.json()
 
         return await asyncio.to_thread(_via_httpx_sync)
@@ -285,21 +297,33 @@ async def fetch_user_positions(
     if s.api_key:
         headers["Authorization"] = f"Bearer {s.api_key}"
 
-    body = await _post_json(
-        s.position_url,
-        payload={"users": users},
-        headers=headers,
-        timeout_sec=s.timeout_sec,
-    )
+    try:
+        body = await _post_json(
+            s.position_url,
+            payload={"users": users},
+            headers=headers,
+            timeout_sec=s.timeout_sec,
+        )
 
-    code = body.get("code")
-    if code != 0:
-        raise RuntimeError(f"ScopeFi API code={code} msg={body.get('msg', '')}")
+        code = body.get("code")
+        if code != 0:
+            raw = json.dumps(body, ensure_ascii=False)[:500]
+            raise RuntimeError(
+                f"ScopeFi API code={code} msg={body.get('msg', '')} raw={raw}"
+            )
 
-    data = body.get("data")
-    if not isinstance(data, list):
-        raise RuntimeError("ScopeFi API 响应 data 不是数组")
-    return data, body
+        data = body.get("data")
+        if not isinstance(data, list):
+            raise RuntimeError(
+                f"ScopeFi API 响应 data 不是数组 raw={json.dumps(body, ensure_ascii=False)[:500]}"
+            )
+        return data, body
+    except Exception as exc:
+        from lark_notice import notify_rest_error  # noqa: E402
+
+        notify_rest_error(exc, api_url=s.position_url)
+        log_error_exc("[rest error]")
+        raise
 
 
 def build_balance_report(
@@ -595,8 +619,8 @@ def main() -> int:
     args = parse_args()
     try:
         return asyncio.run(_run(args))
-    except Exception as e:
-        print(f"[error] {e}", file=sys.stderr)
+    except Exception:
+        log_error_exc()
         return 1
 
 

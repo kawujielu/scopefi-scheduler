@@ -1210,7 +1210,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     _configure_stdio()
     _ensure_scopefi_path()
-    from query_wallet_balance import load_dotenv  # noqa: E402
+    from query_wallet_balance import load_dotenv, log_error_exc  # noqa: E402
 
     env_path = load_dotenv()
     _bind_clickhouse_config(globals())
@@ -1219,8 +1219,8 @@ def main() -> int:
     args = parse_args()
     try:
         return run(dry_run=not args.write)
-    except Exception as e:
-        print(f"[error] {e}", file=sys.stderr)
+    except Exception:
+        log_error_exc()
         return 1
 
 

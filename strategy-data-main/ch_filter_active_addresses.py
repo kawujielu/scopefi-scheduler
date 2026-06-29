@@ -42,6 +42,7 @@ from query_wallet_balance import (  # noqa: E402
     fetch_balances_map,
     get_clickhouse_client,
     load_dotenv,
+    log_error_exc,
     normalize_wallet,
     ScopeFiSettings,
 )
@@ -419,14 +420,14 @@ def main() -> int:
 
     try:
         client = get_client()
-    except Exception as e:
-        print(f"[error] 连接 ClickHouse 失败: {e}", file=sys.stderr)
+    except Exception:
+        log_error_exc("[error] 连接 ClickHouse 失败")
         return 1
 
     try:
         return asyncio.run(run_pipeline(client))
-    except Exception as e:
-        print(f"[error] {e}", file=sys.stderr)
+    except Exception:
+        log_error_exc()
         return 1
 
 
